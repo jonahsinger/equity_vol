@@ -6,15 +6,33 @@ from datetime import datetime, timedelta
 def get_sp500_data(start_date, end_date=None):
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # Get data from at least 90 days (3 months) before the start date to calculate volatility
+    extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=100)).strftime('%Y-%m-%d')
         
     # Get S&P 500 data using the ^GSPC ticker
-    sp500 = yf.download('^GSPC', start=start_date, end=end_date, auto_adjust=True)
+    sp500 = yf.download('^GSPC', start=extended_start, end=end_date, auto_adjust=True)
+    
+    # Calculate daily returns
+    sp500['daily_return'] = sp500['Close'].pct_change()
+    
+    # Calculate rolling volatilities (annualized)
+    # 5 trading days ≈ 1 week, 63 trading days ≈ 3 months, sqrt(252) for annualization
+    sp500['vol_1w'] = sp500['daily_return'].rolling(window=5).std() * np.sqrt(252)
+    sp500['vol_3m'] = sp500['daily_return'].rolling(window=63).std() * np.sqrt(252)
+    
+    # Reset the index after calculations
     sp500 = sp500.reset_index()
+    
+    # Filter to the original date range
+    sp500 = sp500[sp500['Date'] >= start_date]
     
     clean_df = pd.DataFrame()
     clean_df['Date'] = sp500['Date']
     clean_df['Close'] = sp500['Close']
     clean_df['Volume'] = sp500['Volume']
+    clean_df['vol_1w'] = sp500['vol_1w']
+    clean_df['vol_3m'] = sp500['vol_3m']
     
     return clean_df
 
@@ -44,4 +62,5 @@ if __name__ == "__main__":
     # Merge the two dataframes on Date
     combined_data = pd.merge(sp500_data, vix_data, on='Date', how='left')
     
+    # Display the first few rows with all columns
     print(combined_data.head())
