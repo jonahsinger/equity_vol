@@ -21,6 +21,13 @@ def get_sp500_data(start_date, end_date=None):
     sp500['vol_1w'] = sp500['daily_return'].rolling(window=5).std() * np.sqrt(252)
     sp500['vol_3m'] = sp500['daily_return'].rolling(window=63).std() * np.sqrt(252)
     
+    # Calculate returns for different periods
+    # 1-week return (5 trading days)
+    sp500['return_1w'] = sp500['Close'].pct_change(periods=5)
+    
+    # 3-month return (63 trading days)
+    sp500['return_3m'] = sp500['Close'].pct_change(periods=63)
+    
     # Reset the index after calculations
     sp500 = sp500.reset_index()
     
@@ -29,7 +36,8 @@ def get_sp500_data(start_date, end_date=None):
     
     clean_df = pd.DataFrame()
     clean_df['Date'] = sp500['Date']
-    clean_df['Close'] = sp500['Close']
+    clean_df['return_1w'] = sp500['return_1w']
+    clean_df['return_3m'] = sp500['return_3m']
     clean_df['Volume'] = sp500['Volume']
     clean_df['vol_1w'] = sp500['vol_1w']
     clean_df['vol_3m'] = sp500['vol_3m']
