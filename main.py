@@ -80,3 +80,9 @@ if __name__ == "__main__":
     
     # Display the first few rows with all columns
     print(combined_data.head())
+    
+    # Count total missing values
+    total_missing = combined_data.isna().sum().sum()
+    
+    if total_missing == 0:
+        print("No missing values found in the dataset.")
