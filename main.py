@@ -7,11 +7,14 @@ def get_sp500_data(start_date, end_date=None):
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
     
-    # Get data from at least 90 days (3 months) before the start date to calculate volatility
+    # For forward-looking volatility extend the end date by at least 30 days (21 trading days)
+    forward_end_date = (datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=40)).strftime('%Y-%m-%d')
+    
+    # Get data from at least 90 days before the start date to calculate volatility
     extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=100)).strftime('%Y-%m-%d')
         
-    # Get S&P 500 data using the ^GSPC ticker
-    sp500 = yf.download('^GSPC', start=extended_start, end=end_date, auto_adjust=True)
+    # Get S&P 500 data using the ^GSPC ticker, with extended end date
+    sp500 = yf.download('^GSPC', start=extended_start, end=forward_end_date, auto_adjust=True)
     
     # Calculate daily returns
     sp500['daily_return'] = sp500['Close'].pct_change()
@@ -35,11 +38,15 @@ def get_sp500_data(start_date, end_date=None):
     # 3-month volume change (63 trading days instead of 21)
     sp500['volume_change_3m'] = sp500['Volume'].pct_change(periods=63)
     
+    # Calculate forward-looking 1-month (21 trading days) realized volatility
+    rolled_std = sp500['daily_return'].rolling(window=21).std().shift(-21)
+    sp500['forward_volatility_1m'] = rolled_std * np.sqrt(252)  # Annualize
+    
     # Reset the index after calculations
     sp500 = sp500.reset_index()
     
     # Filter to the original date range
-    sp500 = sp500[sp500['Date'] >= start_date]
+    sp500 = sp500[(sp500['Date'] >= start_date) & (sp500['Date'] <= end_date)]
     
     clean_df = pd.DataFrame()
     clean_df['Date'] = sp500['Date']
@@ -49,6 +56,7 @@ def get_sp500_data(start_date, end_date=None):
     clean_df['volume_change_3m'] = sp500['volume_change_3m']
     clean_df['volatility_1w'] = sp500['volatility_1w']
     clean_df['volatility_3m'] = sp500['volatility_3m']
+    clean_df['forward_volatility_1m'] = sp500['forward_volatility_1m']
     
     return clean_df
 
@@ -85,4 +93,7 @@ if __name__ == "__main__":
     total_missing = combined_data.isna().sum().sum()
     
     if total_missing == 0:
-        print("No missing values found in the dataset.")
+        print("\nNo missing values found in the dataset.")
+    else:
+        print("\nMissing values by column:")
+        print(combined_data.isna().sum())
