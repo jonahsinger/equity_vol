@@ -18,8 +18,8 @@ def get_sp500_data(start_date, end_date=None):
     
     # Calculate rolling volatilities (annualized)
     # 5 trading days ≈ 1 week, 63 trading days ≈ 3 months, sqrt(252) for annualization
-    sp500['vol_1w'] = sp500['daily_return'].rolling(window=5).std() * np.sqrt(252)
-    sp500['vol_3m'] = sp500['daily_return'].rolling(window=63).std() * np.sqrt(252)
+    sp500['volatility_1w'] = sp500['daily_return'].rolling(window=5).std() * np.sqrt(252)
+    sp500['volatility_3m'] = sp500['daily_return'].rolling(window=63).std() * np.sqrt(252)
     
     # Calculate returns for different periods
     # 1-week return (5 trading days)
@@ -27,6 +27,13 @@ def get_sp500_data(start_date, end_date=None):
     
     # 3-month return (63 trading days)
     sp500['return_3m'] = sp500['Close'].pct_change(periods=63)
+    
+    # Calculate volume changes
+    # 1-week volume change
+    sp500['volume_change_1w'] = sp500['Volume'].pct_change(periods=5)
+    
+    # 3-month volume change (63 trading days instead of 21)
+    sp500['volume_change_3m'] = sp500['Volume'].pct_change(periods=63)
     
     # Reset the index after calculations
     sp500 = sp500.reset_index()
@@ -38,9 +45,10 @@ def get_sp500_data(start_date, end_date=None):
     clean_df['Date'] = sp500['Date']
     clean_df['return_1w'] = sp500['return_1w']
     clean_df['return_3m'] = sp500['return_3m']
-    clean_df['Volume'] = sp500['Volume']
-    clean_df['vol_1w'] = sp500['vol_1w']
-    clean_df['vol_3m'] = sp500['vol_3m']
+    clean_df['volume_change_1w'] = sp500['volume_change_1w']
+    clean_df['volume_change_3m'] = sp500['volume_change_3m']
+    clean_df['volatility_1w'] = sp500['volatility_1w']
+    clean_df['volatility_3m'] = sp500['volatility_3m']
     
     return clean_df
 
