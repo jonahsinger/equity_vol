@@ -79,7 +79,7 @@ def get_vix_data(start_date, end_date=None):
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
         
-    # Extend the end date by one day to ensure we get data for the last day in our range
+    # Extend the end date by one day to ensure there is for the last day in the range
     end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
     extended_end = (end_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
     
@@ -147,8 +147,8 @@ def data_exploration(data, output_dir='visualizations'):
         plt.plot(data['Date'], data[feature], linewidth=2, color='darkblue')
         
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-        plt.xticks(rotation=45)
+        plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=12))
+        plt.xticks(rotation=90)
         plt.title(f'Time Series: {feature}', fontsize=16)
         plt.ylabel(feature, fontsize=14)
         plt.xlabel('Date', fontsize=14)
@@ -199,8 +199,10 @@ def data_exploration(data, output_dir='visualizations'):
     corr = data[features].corr()
     
     # Create heatmap
-    mask = np.triu(np.ones_like(corr, dtype=bool))
     cmap = sns.diverging_palette(220, 10, as_cmap=True)
+    
+    # Create mask for upper triangle
+    mask = np.triu(np.ones_like(corr, dtype=bool))
     
     sns.heatmap(corr, mask=mask, cmap=cmap, vmax=1, vmin=-1, center=0,
                 square=True, linewidths=.5, annot=True, fmt=".2f", cbar_kws={"shrink": .8})
