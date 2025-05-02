@@ -129,7 +129,7 @@ def get_vix_data(start_date, end_date=None, force_download=False):
     # Only keep the Date and Close columns
     vix_df = pd.DataFrame()
     vix_df['Date'] = vix_data['Date']
-    vix_df['VIX'] = vix_data['Close']  # Rename Close to VIX for clarity
+    vix_df['VIX'] = vix_data['Close'] / 100  # Divide by 100 to scale to similar range as other features
     
     return vix_df
 
@@ -357,6 +357,7 @@ def evaluate_model_metrics(data, n_splits=5):
     tscv = TimeSeriesSplit(n_splits=n_splits)
     
     results = []
+    all_coefficients = []
     
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
@@ -379,7 +380,14 @@ def evaluate_model_metrics(data, n_splits=5):
         print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
         
         # Fit model (OLS linear regression)
-        model = sm.OLS(y_train, sm.add_constant(X_train)).fit()
+        X_train_const = sm.add_constant(X_train)
+        model = sm.OLS(y_train, X_train_const).fit()
+        
+        # Store coefficients
+        coef_dict = {'const': model.params['const']}
+        for feature, coef in zip(X_train.columns, model.params[1:]):
+            coef_dict[feature] = coef
+        all_coefficients.append(coef_dict)
         
         # Predict with model
         predictions = model.predict(sm.add_constant(X_test))
@@ -417,10 +425,31 @@ def evaluate_model_metrics(data, n_splits=5):
     print(f"Average RMSE: {avg_rmse:.4f}")
     print(f"Average MAE: {avg_mae:.4f}")
     
+    # Calculate and display average coefficients
+    print("\n=== Average Model Weights ===")
+    avg_coefs = {}
+    for coef_dict in all_coefficients:
+        for feature, value in coef_dict.items():
+            if feature not in avg_coefs:
+                avg_coefs[feature] = []
+            avg_coefs[feature].append(value)
+    
+    avg_coef_df = pd.DataFrame({
+        'Feature': list(avg_coefs.keys()),
+        'Average Weight': [np.mean(values) for values in avg_coefs.values()],
+        'Std Dev': [np.std(values) for values in avg_coefs.values()]
+    })
+    
+    # Sort by absolute coefficient value
+    avg_coef_df['Abs Weight'] = avg_coef_df['Average Weight'].abs()
+    avg_coef_df = avg_coef_df.sort_values('Abs Weight', ascending=False).drop('Abs Weight', axis=1)
+    
+    print(avg_coef_df.to_string(index=False, float_format='%.6f'))
+    
     # Create visualization
     plt.figure(figsize=(14, 6))
     
-    # Plot metrics as a bar graph
+    # Plot metrics
     bar_width = 0.35
     x = results_df['fold']
     x_pos = np.arange(len(x))
@@ -438,8 +467,8 @@ def evaluate_model_metrics(data, n_splits=5):
         plt.text(i + bar_width/2, mae + 0.005, f'{mae:.4f}', ha='center', va='bottom')
     
     plt.xlabel('Fold')
-    plt.ylabel('Error')
-    plt.title('Model Error Metrics by Fold')
+    plt.ylabel('Error Value (RMSE / MAE)')
+    plt.title('Linear Least Squares Performance')
     plt.grid(True, alpha=0.3)
     plt.legend()
     
@@ -448,12 +477,49 @@ def evaluate_model_metrics(data, n_splits=5):
     # Save visualization
     if not os.path.exists('visualizations'):
         os.makedirs('visualizations')
-    plt.savefig('visualizations/OLS_performance.png', dpi=300, bbox_inches='tight')
+    plt.savefig('visualizations/Linear_Least_Squares_performance.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"Visualization saved to 'visualizations/OLS_performance.png'")
+    # Create a bar chart for feature weights
+    plt.figure(figsize=(14, 8))
+    features = avg_coef_df['Feature'].tolist()
+    weights = avg_coef_df['Average Weight'].tolist()
+    errors = avg_coef_df['Std Dev'].tolist()
     
-    return results_df
+    # Sort by absolute weight for the chart
+    sorted_indices = np.argsort(np.abs(weights))[::-1]
+    features = [features[i] for i in sorted_indices]
+    weights = [weights[i] for i in sorted_indices]
+    errors = [errors[i] for i in sorted_indices]
+    
+    # Create bars with error bars
+    bars = plt.bar(range(len(weights)), weights, yerr=errors, capsize=5)
+    
+    # Color positive and negative bars differently
+    for i, bar in enumerate(bars):
+        if weights[i] < 0:
+            bar.set_color('red')
+        else:
+            bar.set_color('green')
+    
+    # Add value labels on top/bottom of bars
+    for i, bar in enumerate(bars):
+        height = weights[i]
+        plt.text(i, height + (0.01 if height >= 0 else -0.01), 
+                 f'{height:.4f}', ha='center', va='bottom' if height >= 0 else 'top')
+    
+    plt.xticks(range(len(features)), features, rotation=45, ha='right')
+    plt.ylabel('Average Weight')
+    plt.title('Average Feature Weights from Linear Least Squares')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plt.savefig('visualizations/Linear_Least_Squares_weights.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Visualizations saved to 'visualizations/' directory")
+    
+    return results_df, avg_coef_df
 
 if __name__ == "__main__":
     start_date = '2000-01-01'
@@ -495,4 +561,4 @@ if __name__ == "__main__":
     combined_data_clean = combined_data.dropna()
     
     # Evaluate model metrics
-    evaluation_results = evaluate_model_metrics(combined_data_clean)
+    evaluation_results, avg_coef_df = evaluate_model_metrics(combined_data_clean)
