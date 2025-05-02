@@ -8,11 +8,12 @@ import os
 import statsmodels.api as sm
 from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_squared_error, root_mean_squared_error
+from sklearn.metrics import mean_squared_error, root_mean_squared_error, mean_absolute_error
 import pickle
 from sklearn.linear_model import Ridge, Lasso
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GridSearchCV
+from sklearn.neighbors import KNeighborsRegressor
 
 # Function to create cache directory if it doesn't exist
 def ensure_cache_dir():
@@ -932,14 +933,236 @@ def lasso_regression_cv(data, n_splits=5, alphas=None, verbose=False):
     
     return results_df, avg_coef_df, best_alphas
 
-def compare_models(ols_results, ridge_results, lasso_results):
+def knn_regression_cv(data, n_splits=5, k_values=None, verbose=False):
     """
-    Compare the performance of OLS, Ridge, and Lasso regression models.
+    Perform K-Nearest Neighbors Regression with time series cross-validation to select optimal k.
+    
+    Parameters:
+    - data: DataFrame containing features and target variable
+    - n_splits: Number of splits for time series cross-validation
+    - k_values: List of k values to try. If None, a default range will be used.
+    - verbose: If True, print results for each fold
+    
+    Returns:
+    - Results DataFrame and optimized k values
+    """
+    print("\nPerforming KNN Regression with cross-validation...")
+    
+    # Prepare data
+    if 'Date' in data.columns:
+        # Ensure data is sorted by date
+        data = data.sort_values('Date')
+        X = data.drop(['Date', 'forward_volatility_1m'], axis=1)
+        dates = data['Date']
+    else:
+        X = data.drop('forward_volatility_1m', axis=1)
+        dates = range(len(X))
+    
+    y = data['forward_volatility_1m']
+    
+    # Default k range if not provided
+    if k_values is None:
+        # Try a range of k values, considering both small and larger neighborhood sizes
+        k_values = list(range(1, 21)) + list(range(25, 101, 5))
+    
+    # Use TimeSeriesSplit for time-ordered cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    results = []
+    best_k_values = []
+    
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        # Get date ranges for reporting
+        if 'Date' in data.columns:
+            train_start = dates.iloc[train_idx].min()
+            train_end = dates.iloc[train_idx].max()
+            test_start = dates.iloc[test_idx].min()
+            test_end = dates.iloc[test_idx].max()
+        else:
+            train_start = train_idx[0]
+            train_end = train_idx[-1]
+            test_start = test_idx[0]
+            test_end = test_idx[-1]
+        
+        if verbose:
+            print(f"\nFold {fold+1}")
+            print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
+            print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
+        
+        # Standardize features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Use GridSearchCV to find optimal k within this fold
+        knn_cv = GridSearchCV(
+            KNeighborsRegressor(weights='distance'),  # Use distance-weighted predictions
+            {'n_neighbors': k_values},
+            cv=5,  # 5-fold CV within the training data
+            scoring='neg_mean_squared_error',
+            n_jobs=-1
+        )
+        
+        knn_cv.fit(X_train_scaled, y_train)
+        best_k = knn_cv.best_params_['n_neighbors']
+        best_k_values.append(best_k)
+        
+        if verbose:
+            print(f"Optimal k for fold {fold+1}: {best_k}")
+        
+        # Train KNN with best k
+        knn = KNeighborsRegressor(n_neighbors=best_k, weights='distance')
+        knn.fit(X_train_scaled, y_train)
+        
+        # Predict on test set
+        predictions = knn.predict(X_test_scaled)
+        
+        # Calculate metrics
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        mae = mean_absolute_error(y_test, predictions)
+        
+        if verbose:
+            print(f"RMSE with k={best_k}: {rmse:.4f}")
+            print(f"MAE with k={best_k}: {mae:.4f}")
+        
+        # Store results
+        results.append({
+            'fold': fold+1,
+            'k': best_k,
+            'train_size': len(X_train),
+            'test_size': len(X_test),
+            'train_start': train_start,
+            'train_end': train_end,
+            'test_start': test_start,
+            'test_end': test_end,
+            'rmse': rmse,
+            'mae': mae
+        })
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Print average results
+    avg_rmse = results_df['rmse'].mean()
+    avg_mae = results_df['mae'].mean()
+    avg_k = results_df['k'].mean()
+    
+    print("\n=== KNN Regression - Average Results ===")
+    print(f"Average RMSE (using optimal k for each fold): {avg_rmse:.4f}")
+    print(f"Average MAE (using optimal k for each fold): {avg_mae:.4f}")
+    print(f"Average optimal k across folds: {avg_k:.1f}")
+    print(f"Optimal k values by fold: {best_k_values}")
+    
+    # Create visualizations
+    plt.figure(figsize=(14, 6))
+    
+    # Plot metrics
+    bar_width = 0.35
+    x = results_df['fold']
+    x_pos = np.arange(len(x))
+    
+    # Create bars
+    plt.bar(x_pos - bar_width/2, results_df['rmse'], bar_width, label='RMSE', color='blue', alpha=0.7)
+    plt.bar(x_pos + bar_width/2, results_df['mae'], bar_width, label='MAE', color='red', alpha=0.7)
+    
+    # Add fold numbers to x-axis
+    plt.xticks(x_pos, results_df['fold'])
+    
+    # Add value labels on top of bars
+    for i, (rmse, mae, k) in enumerate(zip(results_df['rmse'], results_df['mae'], results_df['k'])):
+        plt.text(i - bar_width/2, rmse + 0.005, f'{rmse:.4f} (k={k})', ha='center', va='bottom', fontsize=8)
+        plt.text(i + bar_width/2, mae + 0.005, f'{mae:.4f}', ha='center', va='bottom', fontsize=8)
+    
+    plt.xlabel('Fold')
+    plt.ylabel('Error Value (RMSE / MAE)')
+    plt.title('KNN Regression Performance')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.tight_layout()
+    
+    # Save visualization
+    if not os.path.exists('visualizations'):
+        os.makedirs('visualizations')
+    plt.savefig('visualizations/KNN_Regression_performance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot k values by fold
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(range(1, n_splits + 1), best_k_values, color='purple', alpha=0.7)
+    plt.axhline(y=avg_k, color='red', linestyle='--', label=f'Average: {avg_k:.1f}')
+    
+    # Add k value labels on top of bars
+    for i, (bar, k) in enumerate(zip(bars, best_k_values)):
+        plt.text(i+1, k + 1, f'k={k}', ha='center', va='bottom')
+    
+    plt.xlabel('Fold')
+    plt.ylabel('Optimal k')
+    plt.title('Optimal k Values by Fold')
+    plt.xticks(range(1, n_splits + 1))
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('visualizations/KNN_Regression_k_values.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create a visualization of k vs RMSE
+    if len(k_values) > 5:  # Only if we have multiple k values to compare
+        plt.figure(figsize=(12, 6))
+        
+        # For demonstration, run a detailed k analysis on the last fold
+        last_fold = n_splits - 1
+        train_idx = list(list(tscv.split(X))[last_fold])[0]
+        test_idx = list(list(tscv.split(X))[last_fold])[1]
+        
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        # Standardize
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Try different k values
+        k_values_detailed = list(range(1, 51))
+        rmse_values = []
+        
+        for k in k_values_detailed:
+            knn = KNeighborsRegressor(n_neighbors=k, weights='distance')
+            knn.fit(X_train_scaled, y_train)
+            predictions = knn.predict(X_test_scaled)
+            rmse = np.sqrt(mean_squared_error(y_test, predictions))
+            rmse_values.append(rmse)
+        
+        # Plot RMSE vs k
+        plt.plot(k_values_detailed, rmse_values, marker='o', linestyle='-', color='blue')
+        plt.axvline(x=best_k_values[last_fold], color='red', linestyle='--', 
+                    label=f'Selected k={best_k_values[last_fold]}')
+        plt.xlabel('Number of Neighbors (k)')
+        plt.ylabel('RMSE')
+        plt.title('RMSE vs k for Last Fold')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('visualizations/KNN_Regression_k_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    print(f"KNN regression visualizations saved to 'visualizations/' directory")
+    
+    return results_df, best_k_values
+
+def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
+    """
+    Compare the performance of OLS, Ridge, Lasso, and KNN regression models.
     
     Parameters:
     - ols_results: DataFrame with OLS results
     - ridge_results: DataFrame with Ridge results
     - lasso_results: DataFrame with Lasso results
+    - knn_results: DataFrame with KNN results
     
     Returns:
     - Comparison DataFrame
@@ -948,10 +1171,12 @@ def compare_models(ols_results, ridge_results, lasso_results):
     ols_rmse = ols_results['rmse']
     ridge_rmse = ridge_results['rmse']
     lasso_rmse = lasso_results['rmse']
+    knn_rmse = knn_results['rmse']
     
     ols_mae = ols_results['mae']
     ridge_mae = ridge_results['mae']
     lasso_mae = lasso_results['mae']
+    knn_mae = knn_results['mae']
     
     # Create comparison DataFrame
     comparison_df = pd.DataFrame({
@@ -959,9 +1184,11 @@ def compare_models(ols_results, ridge_results, lasso_results):
         'OLS_RMSE': ols_rmse,
         'Ridge_RMSE': ridge_rmse,
         'Lasso_RMSE': lasso_rmse,
+        'KNN_RMSE': knn_rmse,
         'OLS_MAE': ols_mae,
         'Ridge_MAE': ridge_mae,
-        'Lasso_MAE': lasso_mae
+        'Lasso_MAE': lasso_mae,
+        'KNN_MAE': knn_mae
     })
     
     # Create visualization comparing all models
@@ -971,11 +1198,12 @@ def compare_models(ols_results, ridge_results, lasso_results):
     plt.subplot(1, 2, 1)
     x = comparison_df['Fold']
     x_pos = np.arange(len(x))
-    bar_width = 0.25
+    bar_width = 0.2
     
-    plt.bar(x_pos - bar_width, comparison_df['OLS_RMSE'], bar_width, label='OLS', color='blue', alpha=0.7)
-    plt.bar(x_pos, comparison_df['Ridge_RMSE'], bar_width, label='Ridge', color='green', alpha=0.7)
-    plt.bar(x_pos + bar_width, comparison_df['Lasso_RMSE'], bar_width, label='Lasso', color='red', alpha=0.7)
+    plt.bar(x_pos - 1.5*bar_width, comparison_df['OLS_RMSE'], bar_width, label='OLS', color='blue', alpha=0.7)
+    plt.bar(x_pos - 0.5*bar_width, comparison_df['Ridge_RMSE'], bar_width, label='Ridge', color='green', alpha=0.7)
+    plt.bar(x_pos + 0.5*bar_width, comparison_df['Lasso_RMSE'], bar_width, label='Lasso', color='red', alpha=0.7)
+    plt.bar(x_pos + 1.5*bar_width, comparison_df['KNN_RMSE'], bar_width, label='KNN', color='purple', alpha=0.7)
     
     plt.xlabel('Fold')
     plt.ylabel('RMSE')
@@ -986,9 +1214,10 @@ def compare_models(ols_results, ridge_results, lasso_results):
     
     # Plot MAE comparison
     plt.subplot(1, 2, 2)
-    plt.bar(x_pos - bar_width, comparison_df['OLS_MAE'], bar_width, label='OLS', color='blue', alpha=0.7)
-    plt.bar(x_pos, comparison_df['Ridge_MAE'], bar_width, label='Ridge', color='green', alpha=0.7)
-    plt.bar(x_pos + bar_width, comparison_df['Lasso_MAE'], bar_width, label='Lasso', color='red', alpha=0.7)
+    plt.bar(x_pos - 1.5*bar_width, comparison_df['OLS_MAE'], bar_width, label='OLS', color='blue', alpha=0.7)
+    plt.bar(x_pos - 0.5*bar_width, comparison_df['Ridge_MAE'], bar_width, label='Ridge', color='green', alpha=0.7)
+    plt.bar(x_pos + 0.5*bar_width, comparison_df['Lasso_MAE'], bar_width, label='Lasso', color='red', alpha=0.7)
+    plt.bar(x_pos + 1.5*bar_width, comparison_df['KNN_MAE'], bar_width, label='KNN', color='purple', alpha=0.7)
     
     plt.xlabel('Fold')
     plt.ylabel('MAE')
@@ -998,14 +1227,14 @@ def compare_models(ols_results, ridge_results, lasso_results):
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('visualizations/model_comparison.png', dpi=300, bbox_inches='tight')
+    plt.savefig('visualizations/all_models_comparison.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     # Calculate average performance
     avg_performance = pd.DataFrame({
-        'Model': ['OLS', 'Ridge', 'Lasso'],
-        'Avg RMSE': [ols_rmse.mean(), ridge_rmse.mean(), lasso_rmse.mean()],
-        'Avg MAE': [ols_mae.mean(), ridge_mae.mean(), lasso_mae.mean()]
+        'Model': ['OLS', 'Ridge', 'Lasso', 'KNN'],
+        'Avg RMSE': [ols_rmse.mean(), ridge_rmse.mean(), lasso_rmse.mean(), knn_rmse.mean()],
+        'Avg MAE': [ols_mae.mean(), ridge_mae.mean(), lasso_mae.mean(), knn_mae.mean()]
     })
     
     # Create bar chart of average performance
@@ -1029,7 +1258,7 @@ def compare_models(ols_results, ridge_results, lasso_results):
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('visualizations/average_model_performance.png', dpi=300, bbox_inches='tight')
+    plt.savefig('visualizations/average_all_models_performance.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     print("\n=== Model Comparison ===")
@@ -1088,5 +1317,8 @@ if __name__ == "__main__":
     # Evaluate lasso regression with automatic alpha selection
     lasso_results, lasso_coefs, lasso_alphas = lasso_regression_cv(combined_data_clean, verbose=False)
     
+    # Evaluate KNN regression with automatic k selection
+    knn_results, knn_k_values = knn_regression_cv(combined_data_clean, verbose=False)
+    
     # Compare all models
-    comparison_df, avg_performance = compare_models(ols_results, ridge_results, lasso_results)
+    comparison_df, avg_performance = compare_all_models(ols_results, ridge_results, lasso_results, knn_results)
