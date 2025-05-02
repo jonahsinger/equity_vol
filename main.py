@@ -4,10 +4,50 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
-from datetime import datetime, timedelta
 import os
+import statsmodels.api as sm
+from datetime import datetime, timedelta
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error, root_mean_squared_error
+import pickle
 
-def download_sp500_data(start_date, end_date=None):
+# Function to create cache directory if it doesn't exist
+def ensure_cache_dir():
+    cache_dir = 'data_cache'
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    return cache_dir
+
+# Function to generate cache file paths
+def get_cache_path(ticker, start_date, end_date):
+    cache_dir = ensure_cache_dir()
+    return os.path.join(cache_dir, f"{ticker}_{start_date}_{end_date}.pkl")
+
+# Function to download or load from cache
+def get_cached_data(ticker, start_date, end_date=None, force_download=False):
+    if end_date is None:
+        end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    cache_path = get_cache_path(ticker, start_date, end_date)
+    
+    # If cache exists and not forcing a download, load from cache
+    if os.path.exists(cache_path) and not force_download:
+        print(f"Loading {ticker} data from cache...")
+        with open(cache_path, 'rb') as f:
+            return pickle.load(f)
+    
+    # Otherwise download the data
+    print(f"Downloading {ticker} data from Yahoo Finance...")
+    data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True)
+    
+    # Save to cache
+    with open(cache_path, 'wb') as f:
+        pickle.dump(data, f)
+    
+    print(f"Data cached to {cache_path}")
+    return data
+
+def download_sp500_data(start_date, end_date=None, force_download=False):
     """
     Download S&P 500 data once with extended date ranges to support all calculations.
     """
@@ -20,9 +60,8 @@ def download_sp500_data(start_date, end_date=None):
     # Get data from at least 100 days before the start date to calculate 3-month volatility and returns
     extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=100)).strftime('%Y-%m-%d')
         
-    # Get S&P 500 data using the ^GSPC ticker, with extended date range
-    print("Downloading S&P 500 data...")
-    sp500 = yf.download('^GSPC', start=extended_start, end=forward_end_date, auto_adjust=True)
+    # Get cached S&P 500 data
+    sp500 = get_cached_data('^GSPC', extended_start, forward_end_date, force_download)
     
     # Calculate daily returns
     sp500['daily_return'] = sp500['Close'].pct_change()
@@ -75,7 +114,7 @@ def get_sp500_data(sp500_data, start_date, end_date=None):
     clean_df['volatility_3m'] = sp500['volatility_3m']
     return clean_df
 
-def get_vix_data(start_date, end_date=None):
+def get_vix_data(start_date, end_date=None, force_download=False):
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
         
@@ -84,8 +123,7 @@ def get_vix_data(start_date, end_date=None):
     extended_end = (end_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
     
     # Get VIX data (ticker: ^VIX)
-    print("Downloading VIX data...")
-    vix_data = yf.download('^VIX', start=start_date, end=extended_end, auto_adjust=True)
+    vix_data = get_cached_data('^VIX', start_date, extended_end, force_download)
     vix_data = vix_data.reset_index()
     
     # Only keep the Date and Close columns
@@ -223,16 +261,213 @@ def data_exploration(data, output_dir='visualizations'):
     
     return target_correlations
 
+
+def ols_time_split(
+        df,
+        target="forward_volatility_1m",
+        date_col="Date",
+        n_splits=5,
+        test_size=250,
+        add_const=True):
+    """
+    Ordinary Least Squares with expanding-window, time-aware CV.
+
+    Parameters
+    ----------
+    df         : DataFrame containing features, target, and date column.
+    target     : Dependent variable column name.
+    date_col   : Date column used to keep chronological order.
+    n_splits   : Number of walk-forward folds.
+    test_size  : Rows in each validation window (≈ trading days).
+    add_const  : If True, include an intercept term.
+
+    Returns
+    -------
+    cv_scores  : DataFrame with per-fold and average RMSE / R².
+    final_res  : statsmodels OLS results on the full sample.
+    """
+
+    df = (df.dropna(subset=[target])
+            .sort_values(date_col)
+            .reset_index(drop=True))
+
+    y = df[target].astype(float)
+    X = df.drop(columns=[target, date_col]).astype(float)
+    if add_const:
+        X = sm.add_constant(X)
+
+    # walk-forward CV
+    tscv   = TimeSeriesSplit(n_splits=n_splits, test_size=test_size)
+    rows   = []
+
+    for i, (train_idx, test_idx) in enumerate(tscv.split(X), 1):
+        res   = sm.OLS(y.iloc[train_idx], X.iloc[train_idx]).fit()
+        y_hat = res.predict(X.iloc[test_idx])
+
+        rmse = mean_squared_error(y.iloc[test_idx], y_hat, squared=False)
+        r2   = 1 - ((y.iloc[test_idx] - y_hat)**2).sum() / \
+                   ((y.iloc[test_idx] - y.iloc[test_idx].mean())**2).sum()
+
+        rows.append({"fold": i, "RMSE": rmse, "R2": r2})
+        print(f"Fold {i}: RMSE={rmse:.4f}  R²={r2:.3f}")
+
+    # summary row
+    avg_rmse = np.mean([r["RMSE"] for r in rows])
+    avg_r2   = np.mean([r["R2"]  for r in rows])
+    rows.append({"fold": "Average", "RMSE": avg_rmse, "R2": avg_r2})
+
+    cv_scores = pd.DataFrame(rows).set_index("fold")
+
+    # final full-sample fit
+    final_res = sm.OLS(y, X).fit()
+
+    print("\n=== Cross-validated performance ===")
+    print(cv_scores)
+    print("\n=== Final OLS coefficients (full sample) ===")
+    print(final_res.params)
+
+    return cv_scores, final_res
+
+def evaluate_model_metrics(data, n_splits=5):
+    """
+    Evaluate model using time series cross-validation, reporting only RMSE and MAE metrics.
+    
+    Parameters:
+    - data: DataFrame containing features and target variable
+    - n_splits: Number of splits for time series cross-validation
+    
+    Returns:
+    - Results DataFrame
+    """
+    print("\nEvaluating model metrics with time series cross-validation...")
+    
+    # Prepare data
+    if 'Date' in data.columns:
+        # Ensure data is sorted by date
+        data = data.sort_values('Date')
+        X = data.drop(['Date', 'forward_volatility_1m'], axis=1)
+        dates = data['Date']
+    else:
+        X = data.drop('forward_volatility_1m', axis=1)
+        dates = range(len(X))
+    
+    y = data['forward_volatility_1m']
+    
+    # Use TimeSeriesSplit for time-ordered cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    results = []
+    
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        # Get date ranges for reporting
+        if 'Date' in data.columns:
+            train_start = dates.iloc[train_idx].min()
+            train_end = dates.iloc[train_idx].max()
+            test_start = dates.iloc[test_idx].min()
+            test_end = dates.iloc[test_idx].max()
+        else:
+            train_start = train_idx[0]
+            train_end = train_idx[-1]
+            test_start = test_idx[0]
+            test_end = test_idx[-1]
+        
+        print(f"\nFold {fold+1}")
+        print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
+        print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
+        
+        # Fit model (OLS linear regression)
+        model = sm.OLS(y_train, sm.add_constant(X_train)).fit()
+        
+        # Predict with model
+        predictions = model.predict(sm.add_constant(X_test))
+        
+        # Calculate metrics
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+        
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        mae = mean_absolute_error(y_test, predictions)
+        
+        print(f"RMSE: {rmse:.4f}")
+        print(f"MAE: {mae:.4f}")
+        
+        # Store results
+        results.append({
+            'fold': fold+1,
+            'train_size': len(X_train),
+            'test_size': len(X_test),
+            'train_start': train_start,
+            'train_end': train_end,
+            'test_start': test_start,
+            'test_end': test_end,
+            'rmse': rmse,
+            'mae': mae
+        })
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Print average results
+    avg_rmse = results_df['rmse'].mean()
+    avg_mae = results_df['mae'].mean()
+    
+    print("\n=== Average Results ===")
+    print(f"Average RMSE: {avg_rmse:.4f}")
+    print(f"Average MAE: {avg_mae:.4f}")
+    
+    # Create visualization
+    plt.figure(figsize=(14, 6))
+    
+    # Plot metrics as a bar graph
+    bar_width = 0.35
+    x = results_df['fold']
+    x_pos = np.arange(len(x))
+    
+    # Create bars
+    plt.bar(x_pos - bar_width/2, results_df['rmse'], bar_width, label='RMSE', color='blue', alpha=0.7)
+    plt.bar(x_pos + bar_width/2, results_df['mae'], bar_width, label='MAE', color='red', alpha=0.7)
+    
+    # Add fold numbers to x-axis
+    plt.xticks(x_pos, results_df['fold'])
+    
+    # Add value labels on top of bars
+    for i, (rmse, mae) in enumerate(zip(results_df['rmse'], results_df['mae'])):
+        plt.text(i - bar_width/2, rmse + 0.005, f'{rmse:.4f}', ha='center', va='bottom')
+        plt.text(i + bar_width/2, mae + 0.005, f'{mae:.4f}', ha='center', va='bottom')
+    
+    plt.xlabel('Fold')
+    plt.ylabel('Error')
+    plt.title('Model Error Metrics by Fold')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.tight_layout()
+    
+    # Save visualization
+    if not os.path.exists('visualizations'):
+        os.makedirs('visualizations')
+    plt.savefig('visualizations/OLS_performance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Visualization saved to 'visualizations/OLS_performance.png'")
+    
+    return results_df
+
 if __name__ == "__main__":
     start_date = '2000-01-01'
     end_date = '2024-12-31'
     
-    # Download S&P 500 data once
-    sp500_data = download_sp500_data(start_date, end_date)
+    # Set to True to force new download instead of using cache
+    force_download = False
+    
+    # Download S&P 500 data
+    sp500_data = download_sp500_data(start_date, end_date, force_download)
     
     # Get feature data
     sp500_features = get_sp500_data(sp500_data, start_date, end_date)
-    vix_data = get_vix_data(start_date, end_date)
+    vix_data = get_vix_data(start_date, end_date, force_download)
     
     # Get forward volatility (target variable)
     forward_vol_data = get_forward_volatility(sp500_data, start_date, end_date)
@@ -254,4 +489,10 @@ if __name__ == "__main__":
         print("\nNo missing values found in the dataset.")
     
     # Run data exploration to create visualizations
-    data_exploration(combined_data)
+    #data_exploration(combined_data)
+    
+    # Drop rows with NaN values before evaluation
+    combined_data_clean = combined_data.dropna()
+    
+    # Evaluate model metrics
+    evaluation_results = evaluate_model_metrics(combined_data_clean)
