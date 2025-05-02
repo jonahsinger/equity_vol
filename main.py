@@ -1322,3 +1322,15 @@ if __name__ == "__main__":
     
     # Compare all models
     comparison_df, avg_performance = compare_all_models(ols_results, ridge_results, lasso_results, knn_results)
+    
+    # Save results to pickle files for later use in comparison plots
+    if not os.path.exists('results_cache'):
+        os.makedirs('results_cache')
+    
+    # Add k values to knn_results for better comparison plots
+    knn_results['k'] = knn_k_values
+    
+    with open('results_cache/ols_results.pkl', 'wb') as f:
+        pickle.dump(ols_results, f)
+    with open('results_cache/knn_results.pkl', 'wb') as f:
+        pickle.dump(knn_results, f)
