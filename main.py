@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, root_mean_squared_error
 import pickle
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
 
 # Function to create cache directory if it doesn't exist
 def ensure_cache_dir():
@@ -328,18 +331,19 @@ def ols_time_split(
 
     return cv_scores, final_res
 
-def evaluate_model_metrics(data, n_splits=5):
+def evaluate_model_metrics(data, n_splits=5, verbose=False):
     """
     Evaluate model using time series cross-validation, reporting only RMSE and MAE metrics.
     
     Parameters:
     - data: DataFrame containing features and target variable
     - n_splits: Number of splits for time series cross-validation
+    - verbose: If True, print results for each fold
     
     Returns:
     - Results DataFrame
     """
-    print("\nEvaluating model metrics with time series cross-validation...")
+    print("\nEvaluating OLS Linear Regression...")
     
     # Prepare data
     if 'Date' in data.columns:
@@ -375,9 +379,10 @@ def evaluate_model_metrics(data, n_splits=5):
             test_start = test_idx[0]
             test_end = test_idx[-1]
         
-        print(f"\nFold {fold+1}")
-        print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
-        print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
+        if verbose:
+            print(f"\nFold {fold+1}")
+            print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
+            print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
         
         # Fit model (OLS linear regression)
         X_train_const = sm.add_constant(X_train)
@@ -398,8 +403,9 @@ def evaluate_model_metrics(data, n_splits=5):
         rmse = np.sqrt(mean_squared_error(y_test, predictions))
         mae = mean_absolute_error(y_test, predictions)
         
-        print(f"RMSE: {rmse:.4f}")
-        print(f"MAE: {mae:.4f}")
+        if verbose:
+            print(f"RMSE: {rmse:.4f}")
+            print(f"MAE: {mae:.4f}")
         
         # Store results
         results.append({
@@ -421,7 +427,7 @@ def evaluate_model_metrics(data, n_splits=5):
     avg_rmse = results_df['rmse'].mean()
     avg_mae = results_df['mae'].mean()
     
-    print("\n=== Average Results ===")
+    print("\n=== OLS Linear Regression - Average Results ===")
     print(f"Average RMSE: {avg_rmse:.4f}")
     print(f"Average MAE: {avg_mae:.4f}")
     
@@ -445,7 +451,23 @@ def evaluate_model_metrics(data, n_splits=5):
     avg_coef_df = avg_coef_df.sort_values('Abs Weight', ascending=False).drop('Abs Weight', axis=1)
     
     print(avg_coef_df.to_string(index=False, float_format='%.6f'))
+
+    # Create visualization of the OLS results but don't print outputs
+    create_model_visualizations(results_df, avg_coef_df, "Linear_Least_Squares")
     
+    print(f"Visualizations saved to 'visualizations/' directory")
+    
+    return results_df, avg_coef_df
+
+def create_model_visualizations(results_df, avg_coef_df, model_name):
+    """
+    Create visualizations for model results.
+    
+    Parameters:
+    - results_df: DataFrame with fold results
+    - avg_coef_df: DataFrame with average coefficients
+    - model_name: Name of the model for file names
+    """
     # Create visualization
     plt.figure(figsize=(14, 6))
     
@@ -468,7 +490,7 @@ def evaluate_model_metrics(data, n_splits=5):
     
     plt.xlabel('Fold')
     plt.ylabel('Error Value (RMSE / MAE)')
-    plt.title('Linear Least Squares Performance')
+    plt.title(f'{model_name} Performance')
     plt.grid(True, alpha=0.3)
     plt.legend()
     
@@ -477,7 +499,7 @@ def evaluate_model_metrics(data, n_splits=5):
     # Save visualization
     if not os.path.exists('visualizations'):
         os.makedirs('visualizations')
-    plt.savefig('visualizations/Linear_Least_Squares_performance.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'visualizations/{model_name}_performance.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     # Create a bar chart for feature weights
@@ -510,16 +532,516 @@ def evaluate_model_metrics(data, n_splits=5):
     
     plt.xticks(range(len(features)), features, rotation=45, ha='right')
     plt.ylabel('Average Weight')
-    plt.title('Average Feature Weights from Linear Least Squares')
+    plt.title(f'Average Feature Weights from {model_name}')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
-    plt.savefig('visualizations/Linear_Least_Squares_weights.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'visualizations/{model_name}_weights.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+def ridge_regression_cv(data, n_splits=5, alphas=None, verbose=False):
+    """
+    Perform Ridge Regression with time series cross-validation to select optimal alpha.
+    
+    Parameters:
+    - data: DataFrame containing features and target variable
+    - n_splits: Number of splits for time series cross-validation
+    - alphas: List of alpha values to try. If None, a default range will be used.
+    - verbose: If True, print results for each fold
+    
+    Returns:
+    - Results DataFrame and optimized coefficients
+    """
+    print("\nPerforming Ridge Regression with cross-validation...")
+    
+    # Prepare data
+    if 'Date' in data.columns:
+        # Ensure data is sorted by date
+        data = data.sort_values('Date')
+        X = data.drop(['Date', 'forward_volatility_1m'], axis=1)
+        dates = data['Date']
+    else:
+        X = data.drop('forward_volatility_1m', axis=1)
+        dates = range(len(X))
+    
+    y = data['forward_volatility_1m']
+    
+    # Default alpha range if not provided
+    if alphas is None:
+        # Wider range from 0.0001 to 100 with more points
+        alphas = np.logspace(-4, 2, 30)
+    
+    # Use TimeSeriesSplit for time-ordered cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    results = []
+    all_coefficients = []
+    best_alphas = []
+    
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        # Get date ranges for reporting
+        if 'Date' in data.columns:
+            train_start = dates.iloc[train_idx].min()
+            train_end = dates.iloc[train_idx].max()
+            test_start = dates.iloc[test_idx].min()
+            test_end = dates.iloc[test_idx].max()
+        else:
+            train_start = train_idx[0]
+            train_end = train_idx[-1]
+            test_start = test_idx[0]
+            test_end = test_idx[-1]
+        
+        if verbose:
+            print(f"\nFold {fold+1}")
+            print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
+            print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
+        
+        # Standardize features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Use GridSearchCV to find optimal alpha within this fold
+        ridge_cv = GridSearchCV(
+            Ridge(random_state=42),
+            {'alpha': alphas},
+            cv=5,  # 5-fold CV within the training data
+            scoring='neg_mean_squared_error',
+            n_jobs=-1
+        )
+        
+        ridge_cv.fit(X_train_scaled, y_train)
+        best_alpha = ridge_cv.best_params_['alpha']
+        best_alphas.append(best_alpha)
+        
+        if verbose:
+            print(f"Optimal alpha for fold {fold+1}: {best_alpha:.6f}")
+        
+        # Train Ridge with best alpha
+        ridge = Ridge(alpha=best_alpha, random_state=42)
+        ridge.fit(X_train_scaled, y_train)
+        
+        # Store coefficients with feature names
+        coef_dict = {}
+        for feature, coef in zip(X_train.columns, ridge.coef_):
+            coef_dict[feature] = coef
+        all_coefficients.append(coef_dict)
+        
+        # Predict on test set
+        predictions = ridge.predict(X_test_scaled)
+        
+        # Calculate metrics
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+        
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        mae = mean_absolute_error(y_test, predictions)
+        
+        if verbose:
+            print(f"RMSE: {rmse:.4f}")
+            print(f"MAE: {mae:.4f}")
+        
+        # Store results
+        results.append({
+            'fold': fold+1,
+            'alpha': best_alpha,
+            'train_size': len(X_train),
+            'test_size': len(X_test),
+            'train_start': train_start,
+            'train_end': train_end,
+            'test_start': test_start,
+            'test_end': test_end,
+            'rmse': rmse,
+            'mae': mae
+        })
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Print average results
+    avg_rmse = results_df['rmse'].mean()
+    avg_mae = results_df['mae'].mean()
+    avg_alpha = results_df['alpha'].mean()
+    
+    print("\n=== Ridge Regression - Average Results ===")
+    print(f"Average RMSE: {avg_rmse:.4f}")
+    print(f"Average MAE: {avg_mae:.4f}")
+    print(f"Average optimal alpha: {avg_alpha:.6f}")
+    
+    # Calculate and display average coefficients
+    print("\n=== Average Ridge Model Weights ===")
+    avg_coefs = {}
+    for coef_dict in all_coefficients:
+        for feature, value in coef_dict.items():
+            if feature not in avg_coefs:
+                avg_coefs[feature] = []
+            avg_coefs[feature].append(value)
+    
+    avg_coef_df = pd.DataFrame({
+        'Feature': list(avg_coefs.keys()),
+        'Average Weight': [np.mean(values) for values in avg_coefs.values()],
+        'Std Dev': [np.std(values) for values in avg_coefs.values()]
+    })
+    
+    # Sort by absolute coefficient value
+    avg_coef_df['Abs Weight'] = avg_coef_df['Average Weight'].abs()
+    avg_coef_df = avg_coef_df.sort_values('Abs Weight', ascending=False).drop('Abs Weight', axis=1)
+    
+    print(avg_coef_df.to_string(index=False, float_format='%.6f'))
+    
+    # Create visualizations but don't print outputs
+    create_model_visualizations(results_df, avg_coef_df, "Ridge_Regression")
+    
+    # Plot alpha values by fold
+    plt.figure(figsize=(10, 6))
+    plt.bar(range(1, n_splits + 1), best_alphas, color='purple', alpha=0.7)
+    plt.axhline(y=avg_alpha, color='red', linestyle='--', label=f'Average: {avg_alpha:.6f}')
+    plt.xlabel('Fold')
+    plt.ylabel('Optimal Alpha')
+    plt.title('Optimal Regularization Parameter (Alpha) by Fold')
+    plt.xticks(range(1, n_splits + 1))
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('visualizations/Ridge_Regression_alphas.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"Visualizations saved to 'visualizations/' directory")
+    print(f"Ridge regression visualizations saved to 'visualizations/' directory")
     
-    return results_df, avg_coef_df
+    return results_df, avg_coef_df, best_alphas
+
+def lasso_regression_cv(data, n_splits=5, alphas=None, verbose=False):
+    """
+    Perform Lasso Regression with time series cross-validation to select optimal alpha.
+    
+    Parameters:
+    - data: DataFrame containing features and target variable
+    - n_splits: Number of splits for time series cross-validation
+    - alphas: List of alpha values to try. If None, a default range will be used.
+    - verbose: If True, print results for each fold
+    
+    Returns:
+    - Results DataFrame and optimized coefficients
+    """
+    print("\nPerforming Lasso Regression with cross-validation...")
+    
+    # Prepare data
+    if 'Date' in data.columns:
+        # Ensure data is sorted by date
+        data = data.sort_values('Date')
+        X = data.drop(['Date', 'forward_volatility_1m'], axis=1)
+        dates = data['Date']
+    else:
+        X = data.drop('forward_volatility_1m', axis=1)
+        dates = range(len(X))
+    
+    y = data['forward_volatility_1m']
+    
+    # Default alpha range if not provided
+    if alphas is None:
+        # Lasso typically needs smaller alpha values than Ridge
+        alphas = np.logspace(-6, 0, 30)
+    
+    # Use TimeSeriesSplit for time-ordered cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    results = []
+    all_coefficients = []
+    best_alphas = []
+    
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        # Get date ranges for reporting
+        if 'Date' in data.columns:
+            train_start = dates.iloc[train_idx].min()
+            train_end = dates.iloc[train_idx].max()
+            test_start = dates.iloc[test_idx].min()
+            test_end = dates.iloc[test_idx].max()
+        else:
+            train_start = train_idx[0]
+            train_end = train_idx[-1]
+            test_start = test_idx[0]
+            test_end = test_idx[-1]
+        
+        if verbose:
+            print(f"\nFold {fold+1}")
+            print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
+            print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
+        
+        # Standardize features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Use GridSearchCV to find optimal alpha within this fold
+        lasso_cv = GridSearchCV(
+            Lasso(random_state=42, max_iter=10000),
+            {'alpha': alphas},
+            cv=5,  # 5-fold CV within the training data
+            scoring='neg_mean_squared_error',
+            n_jobs=-1
+        )
+        
+        lasso_cv.fit(X_train_scaled, y_train)
+        best_alpha = lasso_cv.best_params_['alpha']
+        best_alphas.append(best_alpha)
+        
+        if verbose:
+            print(f"Optimal alpha for fold {fold+1}: {best_alpha:.6f}")
+        
+        # Train Lasso with best alpha
+        lasso = Lasso(alpha=best_alpha, random_state=42, max_iter=10000)
+        lasso.fit(X_train_scaled, y_train)
+        
+        # Store coefficients with feature names
+        coef_dict = {}
+        for feature, coef in zip(X_train.columns, lasso.coef_):
+            coef_dict[feature] = coef
+        all_coefficients.append(coef_dict)
+        
+        # Predict on test set
+        predictions = lasso.predict(X_test_scaled)
+        
+        # Calculate metrics
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+        
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        mae = mean_absolute_error(y_test, predictions)
+        
+        if verbose:
+            print(f"RMSE: {rmse:.4f}")
+            print(f"MAE: {mae:.4f}")
+        
+        # Store results
+        results.append({
+            'fold': fold+1,
+            'alpha': best_alpha,
+            'train_size': len(X_train),
+            'test_size': len(X_test),
+            'train_start': train_start,
+            'train_end': train_end,
+            'test_start': test_start,
+            'test_end': test_end,
+            'rmse': rmse,
+            'mae': mae
+        })
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Print average results
+    avg_rmse = results_df['rmse'].mean()
+    avg_mae = results_df['mae'].mean()
+    avg_alpha = results_df['alpha'].mean()
+    
+    print("\n=== Lasso Regression - Average Results ===")
+    print(f"Average RMSE: {avg_rmse:.4f}")
+    print(f"Average MAE: {avg_mae:.4f}")
+    print(f"Average optimal alpha: {avg_alpha:.6f}")
+    
+    # Calculate and display average coefficients
+    print("\n=== Average Lasso Model Weights ===")
+    avg_coefs = {}
+    for coef_dict in all_coefficients:
+        for feature, value in coef_dict.items():
+            if feature not in avg_coefs:
+                avg_coefs[feature] = []
+            avg_coefs[feature].append(value)
+    
+    avg_coef_df = pd.DataFrame({
+        'Feature': list(avg_coefs.keys()),
+        'Average Weight': [np.mean(values) for values in avg_coefs.values()],
+        'Std Dev': [np.std(values) for values in avg_coefs.values()],
+        'Zero Count': [sum(1 for v in values if v == 0) for values in avg_coefs.values()]
+    })
+    
+    # Sort by absolute coefficient value
+    avg_coef_df['Abs Weight'] = avg_coef_df['Average Weight'].abs()
+    avg_coef_df = avg_coef_df.sort_values('Abs Weight', ascending=False).drop('Abs Weight', axis=1)
+    
+    print(avg_coef_df.to_string(index=False, float_format='%.6f'))
+    
+    # Create visualizations but don't print outputs
+    create_model_visualizations(results_df, avg_coef_df, "Lasso_Regression")
+    
+    # Plot alpha values by fold
+    plt.figure(figsize=(10, 6))
+    plt.bar(range(1, n_splits + 1), best_alphas, color='purple', alpha=0.7)
+    plt.axhline(y=avg_alpha, color='red', linestyle='--', label=f'Average: {avg_alpha:.6f}')
+    plt.xlabel('Fold')
+    plt.ylabel('Optimal Alpha')
+    plt.title('Optimal Regularization Parameter (Alpha) by Fold')
+    plt.xticks(range(1, n_splits + 1))
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('visualizations/Lasso_Regression_alphas.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create a special bar chart for Lasso feature weights with zero counts
+    plt.figure(figsize=(14, 8))
+    features = avg_coef_df['Feature'].tolist()
+    weights = avg_coef_df['Average Weight'].tolist()
+    errors = avg_coef_df['Std Dev'].tolist()
+    
+    # Sort by absolute weight for the chart
+    sorted_indices = np.argsort(np.abs(weights))[::-1]
+    features = [features[i] for i in sorted_indices]
+    weights = [weights[i] for i in sorted_indices]
+    errors = [errors[i] for i in sorted_indices]
+    zero_counts = [avg_coef_df.loc[idx, 'Zero Count'] for idx in sorted_indices]
+    
+    # Create bars with error bars
+    bars = plt.bar(range(len(weights)), weights, yerr=errors, capsize=5)
+    
+    # Color positive and negative bars differently
+    for i, bar in enumerate(bars):
+        if weights[i] < 0:
+            bar.set_color('red')
+        else:
+            bar.set_color('green')
+        
+        # Highlight bars with zero coefficients
+        if zero_counts[i] > 0:
+            bar.set_alpha(0.5)
+    
+    # Add value labels on top/bottom of bars
+    for i, bar in enumerate(bars):
+        height = weights[i]
+        if abs(height) >= 0.001:  # Only label non-zero coefficients
+            plt.text(i, height + (0.01 if height >= 0 else -0.01), 
+                     f'{height:.4f}', ha='center', va='bottom' if height >= 0 else 'top')
+        if zero_counts[i] > 0:
+            plt.text(i, 0, f'0 in {zero_counts[i]}/{n_splits}', ha='center', va='bottom', 
+                     rotation=90, fontsize=8, color='gray')
+    
+    plt.xticks(range(len(features)), features, rotation=45, ha='right')
+    plt.ylabel('Average Weight')
+    plt.title('Average Feature Weights from Lasso Regression')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plt.savefig('visualizations/Lasso_Regression_weights.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Lasso regression visualizations saved to 'visualizations/' directory")
+    
+    return results_df, avg_coef_df, best_alphas
+
+def compare_models(ols_results, ridge_results, lasso_results):
+    """
+    Compare the performance of OLS, Ridge, and Lasso regression models.
+    
+    Parameters:
+    - ols_results: DataFrame with OLS results
+    - ridge_results: DataFrame with Ridge results
+    - lasso_results: DataFrame with Lasso results
+    
+    Returns:
+    - Comparison DataFrame
+    """
+    # Prepare data for comparison
+    ols_rmse = ols_results['rmse']
+    ridge_rmse = ridge_results['rmse']
+    lasso_rmse = lasso_results['rmse']
+    
+    ols_mae = ols_results['mae']
+    ridge_mae = ridge_results['mae']
+    lasso_mae = lasso_results['mae']
+    
+    # Create comparison DataFrame
+    comparison_df = pd.DataFrame({
+        'Fold': range(1, len(ols_rmse) + 1),
+        'OLS_RMSE': ols_rmse,
+        'Ridge_RMSE': ridge_rmse,
+        'Lasso_RMSE': lasso_rmse,
+        'OLS_MAE': ols_mae,
+        'Ridge_MAE': ridge_mae,
+        'Lasso_MAE': lasso_mae
+    })
+    
+    # Create visualization comparing all models
+    plt.figure(figsize=(16, 8))
+    
+    # Plot RMSE comparison
+    plt.subplot(1, 2, 1)
+    x = comparison_df['Fold']
+    x_pos = np.arange(len(x))
+    bar_width = 0.25
+    
+    plt.bar(x_pos - bar_width, comparison_df['OLS_RMSE'], bar_width, label='OLS', color='blue', alpha=0.7)
+    plt.bar(x_pos, comparison_df['Ridge_RMSE'], bar_width, label='Ridge', color='green', alpha=0.7)
+    plt.bar(x_pos + bar_width, comparison_df['Lasso_RMSE'], bar_width, label='Lasso', color='red', alpha=0.7)
+    
+    plt.xlabel('Fold')
+    plt.ylabel('RMSE')
+    plt.title('RMSE Comparison by Fold')
+    plt.xticks(x_pos, comparison_df['Fold'])
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Plot MAE comparison
+    plt.subplot(1, 2, 2)
+    plt.bar(x_pos - bar_width, comparison_df['OLS_MAE'], bar_width, label='OLS', color='blue', alpha=0.7)
+    plt.bar(x_pos, comparison_df['Ridge_MAE'], bar_width, label='Ridge', color='green', alpha=0.7)
+    plt.bar(x_pos + bar_width, comparison_df['Lasso_MAE'], bar_width, label='Lasso', color='red', alpha=0.7)
+    
+    plt.xlabel('Fold')
+    plt.ylabel('MAE')
+    plt.title('MAE Comparison by Fold')
+    plt.xticks(x_pos, comparison_df['Fold'])
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('visualizations/model_comparison.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Calculate average performance
+    avg_performance = pd.DataFrame({
+        'Model': ['OLS', 'Ridge', 'Lasso'],
+        'Avg RMSE': [ols_rmse.mean(), ridge_rmse.mean(), lasso_rmse.mean()],
+        'Avg MAE': [ols_mae.mean(), ridge_mae.mean(), lasso_mae.mean()]
+    })
+    
+    # Create bar chart of average performance
+    plt.figure(figsize=(12, 6))
+    x_pos = np.arange(len(avg_performance['Model']))
+    bar_width = 0.35
+    
+    plt.bar(x_pos - bar_width/2, avg_performance['Avg RMSE'], bar_width, label='RMSE', color='blue', alpha=0.7)
+    plt.bar(x_pos + bar_width/2, avg_performance['Avg MAE'], bar_width, label='MAE', color='red', alpha=0.7)
+    
+    # Add value labels on top of bars
+    for i, (rmse, mae) in enumerate(zip(avg_performance['Avg RMSE'], avg_performance['Avg MAE'])):
+        plt.text(i - bar_width/2, rmse + 0.001, f'{rmse:.4f}', ha='center', va='bottom')
+        plt.text(i + bar_width/2, mae + 0.001, f'{mae:.4f}', ha='center', va='bottom')
+    
+    plt.xlabel('Model')
+    plt.ylabel('Error Value')
+    plt.title('Average Model Performance')
+    plt.xticks(x_pos, avg_performance['Model'])
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('visualizations/average_model_performance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print("\n=== Model Comparison ===")
+    print(avg_performance.to_string(index=False, float_format='%.4f'))
+    
+    # Determine the best model based on RMSE
+    best_model_idx = avg_performance['Avg RMSE'].idxmin()
+    best_model = avg_performance.loc[best_model_idx, 'Model']
+    
+    print(f"\nBest performing model based on RMSE: {best_model}")
+    
+    return comparison_df, avg_performance
 
 if __name__ == "__main__":
     start_date = '2000-01-01'
@@ -554,11 +1076,17 @@ if __name__ == "__main__":
     else:
         print("\nNo missing values found in the dataset.")
     
-    # Run data exploration to create visualizations
-    #data_exploration(combined_data)
-    
     # Drop rows with NaN values before evaluation
     combined_data_clean = combined_data.dropna()
     
-    # Evaluate model metrics
-    evaluation_results, avg_coef_df = evaluate_model_metrics(combined_data_clean)
+    # Evaluate OLS regression
+    ols_results, ols_coefs = evaluate_model_metrics(combined_data_clean, verbose=False)
+    
+    # Evaluate ridge regression with automatic alpha selection
+    ridge_results, ridge_coefs, ridge_alphas = ridge_regression_cv(combined_data_clean, verbose=False)
+    
+    # Evaluate lasso regression with automatic alpha selection
+    lasso_results, lasso_coefs, lasso_alphas = lasso_regression_cv(combined_data_clean, verbose=False)
+    
+    # Compare all models
+    comparison_df, avg_performance = compare_models(ols_results, ridge_results, lasso_results)
