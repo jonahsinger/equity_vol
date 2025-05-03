@@ -2,6 +2,8 @@
 
 This project compares different machine learning models for predicting future equity volatility using features from S&P 500 and VIX data.
 
+If you have trouble running the code feel free to email jrs2338@columbia.edu and I can help
+
 ## Requirements
 
 - Python 3.8+
