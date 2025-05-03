@@ -1310,9 +1310,81 @@ def create_nn_visualizations(results_df, best_params_all_folds):
     
     print(f"Neural Network visualizations saved to 'visualizations/' directory")
 
-def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, nn_results=None):
+def evaluate_vix_baseline(data, n_splits=5, verbose=False):
     """
-    Compare the performance of OLS, Ridge, Lasso, KNN, and Neural Network regression models.
+    Evaluate the 'naive' approach of using VIX directly as the prediction for future volatility.
+    Measures how well VIX predicts future realized volatility without any transformation.
+    
+    Parameters:
+    - data: DataFrame containing VIX and forward volatility data
+    - n_splits: Number of splits for time series cross-validation
+    - verbose: If True, print results for each fold
+    
+    Returns:
+    - Results DataFrame
+    """
+    print("\nEvaluating VIX as direct predictor (baseline)...")
+    
+    # Prepare data
+    data = data.sort_values('Date')
+    X_vix = data[['VIX']]
+    y = data['forward_volatility_1m']
+    dates = data['Date']
+    
+    # Use TimeSeriesSplit for time-ordered cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    results = []
+    
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X_vix)):
+        # We don't need training data for this approach, only testing
+        X_test = X_vix.iloc[test_idx]
+        y_test = y.iloc[test_idx]
+        
+        # VIX as direct prediction (no transformation)
+        predictions = X_test['VIX']
+        
+        # Calculate metrics
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        mae = mean_absolute_error(y_test, predictions)
+        
+        # Get date ranges for reporting
+        test_start = dates.iloc[test_idx].min()
+        test_end = dates.iloc[test_idx].max()
+        
+        if verbose:
+            print(f"\nFold {fold+1}")
+            print(f"Test period: {test_start} to {test_end} ({len(X_test)} samples)")
+            print(f"RMSE: {rmse:.4f}")
+            print(f"MAE: {mae:.4f}")
+        
+        # Store results
+        results.append({
+            'fold': fold+1,
+            'test_start': test_start,
+            'test_end': test_end,
+            'test_size': len(X_test),
+            'rmse': rmse,
+            'mae': mae
+        })
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Print average results
+    avg_rmse = results_df['rmse'].mean()
+    avg_mae = results_df['mae'].mean()
+    
+    print("\n=== VIX Baseline - Average Results ===")
+    print(f"Average RMSE: {avg_rmse:.4f}")
+    print(f"Average MAE: {avg_mae:.4f}")
+    
+    return results_df
+
+def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, nn_results=None, vix_results=None):
+    """
+    Compare the performance of OLS, Ridge, Lasso, KNN, and Neural Network regression models,
+    and optionally the VIX baseline.
     
     Parameters:
     - ols_results: DataFrame with OLS results
@@ -1320,6 +1392,7 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, n
     - lasso_results: DataFrame with Lasso results
     - knn_results: DataFrame with KNN results
     - nn_results: DataFrame with Neural Network results (optional)
+    - vix_results: DataFrame with VIX baseline results (optional)
     
     Returns:
     - Comparison DataFrame and average performance DataFrame
@@ -1348,14 +1421,24 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, n
         'KNN_MAE': knn_mae
     })
     
-    # Add neural network results if provided
+    # Create model list
     model_names = ['OLS', 'Ridge', 'Lasso', 'KNN']
+    
+    # Add neural network results if provided
     if nn_results is not None and not nn_results.empty:
         nn_rmse = nn_results['rmse']
         nn_mae = nn_results['mae']
         comparison_df['NN_RMSE'] = nn_rmse
         comparison_df['NN_MAE'] = nn_mae
         model_names.append('NN')
+    
+    # Add VIX baseline results if provided
+    if vix_results is not None and not vix_results.empty:
+        vix_rmse = vix_results['rmse']
+        vix_mae = vix_results['mae']
+        comparison_df['VIX_RMSE'] = vix_rmse
+        comparison_df['VIX_MAE'] = vix_mae
+        model_names.append('VIX')
     
     # Create visualization comparing all models
     plt.figure(figsize=(16, 8))
@@ -1373,7 +1456,8 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, n
         'Ridge': 'green',
         'Lasso': 'orange',
         'KNN': 'purple',
-        'NN': 'red'
+        'NN': 'red',
+        'VIX': 'brown'
     }
     
     # Position multipliers for bar placement
@@ -1439,6 +1523,11 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, n
     if nn_results is not None and not nn_results.empty:
         avg_performance['Avg RMSE'].append(nn_rmse.mean())
         avg_performance['Avg MAE'].append(nn_mae.mean())
+    
+    # Add VIX to average performance if provided
+    if vix_results is not None and not vix_results.empty:
+        avg_performance['Avg RMSE'].append(vix_rmse.mean())
+        avg_performance['Avg MAE'].append(vix_mae.mean())
     
     avg_df = pd.DataFrame(avg_performance)
     
@@ -1510,6 +1599,9 @@ if __name__ == "__main__":
     # Drop rows with NaN values before evaluation
     combined_data_clean = combined_data.dropna()
     
+    # Evaluate VIX baseline (using VIX directly as prediction)
+    vix_results = evaluate_vix_baseline(combined_data_clean, verbose=False)
+    
     # Evaluate OLS regression
     ols_results, ols_coefs = evaluate_model_metrics(combined_data_clean, verbose=False)
     
@@ -1526,7 +1618,7 @@ if __name__ == "__main__":
     nn_results, nn_params = ffnn_regression_cv(combined_data_clean, verbose=False)
     
     # Compare all models
-    comparison_df, avg_performance = compare_all_models(ols_results, ridge_results, lasso_results, knn_results, nn_results)
+    comparison_df, avg_performance = compare_all_models(ols_results, ridge_results, lasso_results, knn_results, nn_results, vix_results)
     
     # Save results to pickle files for later use in comparison plots
     if not os.path.exists('results_cache'):
@@ -1545,3 +1637,5 @@ if __name__ == "__main__":
         pickle.dump(knn_results, f)
     with open('results_cache/nn_results.pkl', 'wb') as f:
         pickle.dump(nn_results, f)
+    with open('results_cache/vix_results.pkl', 'wb') as f:
+        pickle.dump(vix_results, f)
