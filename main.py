@@ -18,78 +18,29 @@ from sklearn.neural_network import MLPRegressor
 import warnings
 warnings.filterwarnings('ignore')
 
-# Function to create cache directory if it doesn't exist
-def ensure_cache_dir():
-    cache_dir = 'data_cache'
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-    return cache_dir
-
-# Function to generate cache file paths
-def get_cache_path(ticker, start_date, end_date):
-    cache_dir = ensure_cache_dir()
-    return os.path.join(cache_dir, f"{ticker}_{start_date}_{end_date}.pkl")
-
-# Function to download or load from cache
-def get_cached_data(ticker, start_date, end_date=None, force_download=False):
-    if end_date is None:
-        end_date = datetime.now().strftime('%Y-%m-%d')
-    
-    cache_path = get_cache_path(ticker, start_date, end_date)
-    
-    # If cache exists and not forcing a download, load from cache
-    if os.path.exists(cache_path) and not force_download:
-        print(f"Loading {ticker} data from cache...")
-        with open(cache_path, 'rb') as f:
-            return pickle.load(f)
-    
-    # Otherwise download the data
-    print(f"Downloading {ticker} data from Yahoo Finance...")
-    data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True)
-    
-    # Save to cache
-    with open(cache_path, 'wb') as f:
-        pickle.dump(data, f)
-    
-    print(f"Data cached to {cache_path}")
-    return data
-
-def download_sp500_data(start_date, end_date=None, force_download=False):
-    """
-    Download S&P 500 data once with extended date ranges to support all calculations.
-    """
-    if end_date is None:
-        end_date = datetime.now().strftime('%Y-%m-%d')
-    
+# Function to download S&P 500 data directly from yfinance
+def download_sp500_data(start_date, end_date=None):
     # For forward-looking volatility extend the end date by at least 30 days (21 trading days)
     forward_end_date = (datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=40)).strftime('%Y-%m-%d')
     # Get data from at least 100 days before the start date to calculate 3-month volatility and returns
     extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=100)).strftime('%Y-%m-%d')
-        
-    # Get cached S&P 500 data
-    sp500 = get_cached_data('^GSPC', extended_start, forward_end_date, force_download)
-    
+    print(f"Downloading S&P 500 data from Yahoo Finance...")
+    sp500 = yf.download('^GSPC', start=extended_start, end=forward_end_date, auto_adjust=True)
     # Calculate daily returns
     sp500['daily_return'] = sp500['Close'].pct_change()
-    
     return sp500
 
 def get_sp500_data(sp500_data, start_date, end_date=None):
     """
     Process the already downloaded S&P 500 data to calculate features.
     """
-    if end_date is None:
-        end_date = datetime.now().strftime('%Y-%m-%d')
-    
     # Make a copy to avoid modifying the original
     sp500 = sp500_data.copy()
-    
+
     # Calculate rolling volatilities (annualized)
-    # 5 trading days ≈ 1 week, 63 trading days ≈ 3 months, sqrt(252) for annualization
     sp500['volatility_1w'] = sp500['daily_return'].rolling(window=5).std() * np.sqrt(252)
     sp500['volatility_3m'] = sp500['daily_return'].rolling(window=63).std() * np.sqrt(252)
     
-    # Calculate returns for different periods
     # 1-week return (5 trading days)
     sp500['return_1w'] = sp500['Close'].pct_change(periods=5)
     
@@ -97,10 +48,7 @@ def get_sp500_data(sp500_data, start_date, end_date=None):
     sp500['return_3m'] = sp500['Close'].pct_change(periods=63)
     
     # Calculate volume changes
-    # 1-week volume change
     sp500['volume_change_1w'] = sp500['Volume'].pct_change(periods=5)
-    
-    # 3-month volume change (63 trading days instead of 21)
     sp500['volume_change_3m'] = sp500['Volume'].pct_change(periods=63)
     
     # Reset the index after calculations
@@ -120,16 +68,17 @@ def get_sp500_data(sp500_data, start_date, end_date=None):
     clean_df['volatility_3m'] = sp500['volatility_3m']
     return clean_df
 
-def get_vix_data(start_date, end_date=None, force_download=False):
+def get_vix_data(start_date, end_date=None):
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
         
-    # Extend the end date by one day to ensure there is for the last day in the range
+    # Extend the end date by one day to ensure there is data for the last day in the range
     end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
     extended_end = (end_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
     
     # Get VIX data (ticker: ^VIX)
-    vix_data = get_cached_data('^VIX', start_date, extended_end, force_download)
+    print(f"Downloading VIX data from Yahoo Finance...")
+    vix_data = yf.download('^VIX', start=start_date, end=extended_end, auto_adjust=True)
     vix_data = vix_data.reset_index()
     
     # Only keep the Date and Close columns
@@ -167,10 +116,6 @@ def get_forward_volatility(sp500_data, start_date, end_date=None):
 def data_exploration(data, output_dir='visualizations'):
     """
     Create line graphs and histograms for all features in the dataset
-    
-    Parameters:
-    - data: DataFrame containing all features
-    - output_dir: Directory to save visualization files
     """
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -1536,15 +1481,12 @@ if __name__ == "__main__":
     start_date = '2000-01-01'
     end_date = '2024-12-31'
     
-    # Set to True to force new download instead of using cache
-    force_download = False
-    
     # Download S&P 500 data
-    sp500_data = download_sp500_data(start_date, end_date, force_download)
+    sp500_data = download_sp500_data(start_date, end_date)
     
     # Get feature data
     sp500_features = get_sp500_data(sp500_data, start_date, end_date)
-    vix_data = get_vix_data(start_date, end_date, force_download)
+    vix_data = get_vix_data(start_date, end_date)
     
     # Get forward volatility (target variable)
     forward_vol_data = get_forward_volatility(sp500_data, start_date, end_date)
