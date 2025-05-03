@@ -14,6 +14,9 @@ from sklearn.linear_model import Ridge, Lasso
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GridSearchCV
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+import warnings
+warnings.filterwarnings('ignore')
 
 # Function to create cache directory if it doesn't exist
 def ensure_cache_dir():
@@ -60,7 +63,6 @@ def download_sp500_data(start_date, end_date=None, force_download=False):
     
     # For forward-looking volatility extend the end date by at least 30 days (21 trading days)
     forward_end_date = (datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=40)).strftime('%Y-%m-%d')
-    
     # Get data from at least 100 days before the start date to calculate 3-month volatility and returns
     extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=100)).strftime('%Y-%m-%d')
         
@@ -1154,18 +1156,228 @@ def knn_regression_cv(data, n_splits=5, k_values=None, verbose=False):
     
     return results_df, best_k_values
 
-def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
+def ffnn_regression_cv(data, n_splits=5, verbose=False):
     """
-    Compare the performance of OLS, Ridge, Lasso, and KNN regression models.
+    Perform Feed-Forward Neural Network regression with time series cross-validation.
+    Uses scikit-learn's MLPRegressor for neural network implementation.
+    
+    Parameters:
+    - data: DataFrame containing features and target variable
+    - n_splits: Number of splits for time series cross-validation
+    - verbose: If True, print results for each fold
+    
+    Returns:
+    - Results DataFrame and optimized network parameters
+    """
+    print("\nPerforming Feed-Forward Neural Network with cross-validation...")
+    
+    # Prepare data
+    if 'Date' in data.columns:
+        # Ensure data is sorted by date
+        data = data.sort_values('Date')
+        X = data.drop(['Date', 'forward_volatility_1m'], axis=1)
+        dates = data['Date']
+    else:
+        X = data.drop('forward_volatility_1m', axis=1)
+        dates = range(len(X))
+    
+    y = data['forward_volatility_1m']
+    
+    # Define hyperparameter options
+    hidden_layer_sizes_options = [(16,), (32,), (64,), (16, 8), (32, 16), (64, 32)]
+    alpha_options = [0.0001, 0.001, 0.01, 0.1]
+    learning_rate_options = ['constant', 'adaptive']
+    
+    # Use TimeSeriesSplit for time-ordered cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    results = []
+    best_params_all_folds = []
+    
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        # Get date ranges for reporting
+        if 'Date' in data.columns:
+            train_start = dates.iloc[train_idx].min()
+            train_end = dates.iloc[train_idx].max()
+            test_start = dates.iloc[test_idx].min()
+            test_end = dates.iloc[test_idx].max()
+        else:
+            train_start = train_idx[0]
+            train_end = train_idx[-1]
+            test_start = test_idx[0]
+            test_end = test_idx[-1]
+        
+        if verbose:
+            print(f"\nFold {fold+1}")
+            print(f"Train: {train_start} to {train_end} ({len(X_train)} samples)")
+            print(f"Test: {test_start} to {test_end} ({len(X_test)} samples)")
+        
+        # Standardize features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Grid search for optimal hyperparameters
+        param_grid = {
+            'hidden_layer_sizes': hidden_layer_sizes_options,
+            'alpha': alpha_options,
+            'learning_rate': learning_rate_options
+        }
+        
+        # Perform nested cross-validation to find best hyperparameters
+        inner_cv = TimeSeriesSplit(n_splits=3)  # Smaller number of splits for inner CV
+        mlp = MLPRegressor(
+            max_iter=1000, 
+            random_state=42, 
+            activation='relu',
+            early_stopping=True,
+            validation_fraction=0.1
+        )
+        
+        grid = GridSearchCV(
+            estimator=mlp, 
+            param_grid=param_grid, 
+            cv=inner_cv, 
+            verbose=0, 
+            n_jobs=-1, 
+            scoring='neg_mean_squared_error'
+        )
+        
+        if verbose:
+            print("Finding optimal hyperparameters...")
+            
+        grid_result = grid.fit(X_train_scaled, y_train)
+        
+        # Get best parameters
+        best_params = grid_result.best_params_
+        best_params_all_folds.append(best_params)
+        if verbose:
+            print(f"Best parameters for fold {fold+1}: {best_params}")
+        
+        # Train with best parameters
+        best_mlp = MLPRegressor(
+            hidden_layer_sizes=best_params['hidden_layer_sizes'],
+            alpha=best_params['alpha'],
+            learning_rate=best_params['learning_rate'],
+            activation='relu',
+            max_iter=2000,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.1
+        )
+        
+        best_mlp.fit(X_train_scaled, y_train)
+        
+        # Predict on test set
+        predictions = best_mlp.predict(X_test_scaled)
+        
+        # Calculate metrics
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        mae = mean_absolute_error(y_test, predictions)
+        
+        if verbose:
+            print(f"RMSE: {rmse:.4f}")
+            print(f"MAE: {mae:.4f}")
+        
+        # Store results
+        results.append({
+            'fold': fold+1,
+            'hidden_layers': str(best_params['hidden_layer_sizes']),
+            'alpha': best_params['alpha'],
+            'learning_rate': best_params['learning_rate'],
+            'train_size': len(X_train),
+            'test_size': len(X_test),
+            'train_start': train_start,
+            'train_end': train_end,
+            'test_start': test_start,
+            'test_end': test_end,
+            'rmse': rmse,
+            'mae': mae
+        })
+    
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Print average results
+    avg_rmse = results_df['rmse'].mean()
+    avg_mae = results_df['mae'].mean()
+    
+    print("\n=== Feed-Forward Neural Network - Average Results ===")
+    print(f"Average RMSE: {avg_rmse:.4f}")
+    print(f"Average MAE: {avg_mae:.4f}")
+    
+    # Print hyperparameters
+    print("\n=== Neural Network Hyperparameters by Fold ===")
+    for i, params in enumerate(best_params_all_folds):
+        print(f"Fold {i+1}: Hidden Layers={params['hidden_layer_sizes']}, Alpha={params['alpha']}, Learning Rate={params['learning_rate']}")
+    
+    # Create visualizations
+    create_nn_visualizations(results_df, best_params_all_folds)
+    
+    return results_df, best_params_all_folds
+
+def create_nn_visualizations(results_df, best_params_all_folds):
+    """
+    Create visualizations for Neural Network results.
+    
+    Parameters:
+    - results_df: DataFrame with fold results
+    - best_params_all_folds: List of best hyperparameters for each fold
+    """
+    # 1. Performance by fold
+    plt.figure(figsize=(14, 6))
+    
+    # Plot metrics
+    bar_width = 0.35
+    x = results_df['fold']
+    x_pos = np.arange(len(x))
+    
+    # Create bars
+    plt.bar(x_pos - bar_width/2, results_df['rmse'], bar_width, label='RMSE', color='blue', alpha=0.7)
+    plt.bar(x_pos + bar_width/2, results_df['mae'], bar_width, label='MAE', color='red', alpha=0.7)
+    
+    # Add fold numbers to x-axis
+    plt.xticks(x_pos, results_df['fold'])
+    
+    # Add value labels on top of bars
+    for i, (rmse, mae, hidden, alpha, lr) in enumerate(zip(
+            results_df['rmse'], results_df['mae'], 
+            results_df['hidden_layers'], results_df['alpha'],
+            results_df['learning_rate'])):
+        plt.text(i - bar_width/2, rmse + 0.005, f'{rmse:.4f}', ha='center', va='bottom', fontsize=9)
+        plt.text(i + bar_width/2, mae + 0.005, f'{mae:.4f}', ha='center', va='bottom', fontsize=9)
+        plt.text(i, 0.01, f'{hidden}\nα={alpha}\n{lr}', ha='center', va='bottom', fontsize=8)
+    
+    plt.xlabel('Fold')
+    plt.ylabel('Error Value (RMSE / MAE)')
+    plt.title('Neural Network Performance by Fold')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.tight_layout()
+    if not os.path.exists('visualizations'):
+        os.makedirs('visualizations')
+    plt.savefig('visualizations/NN_performance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Neural Network visualizations saved to 'visualizations/' directory")
+
+def compare_all_models(ols_results, ridge_results, lasso_results, knn_results, nn_results=None):
+    """
+    Compare the performance of OLS, Ridge, Lasso, KNN, and Neural Network regression models.
     
     Parameters:
     - ols_results: DataFrame with OLS results
     - ridge_results: DataFrame with Ridge results
     - lasso_results: DataFrame with Lasso results
     - knn_results: DataFrame with KNN results
+    - nn_results: DataFrame with Neural Network results (optional)
     
     Returns:
-    - Comparison DataFrame
+    - Comparison DataFrame and average performance DataFrame
     """
     # Prepare data for comparison
     ols_rmse = ols_results['rmse']
@@ -1191,6 +1403,15 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
         'KNN_MAE': knn_mae
     })
     
+    # Add neural network results if provided
+    model_names = ['OLS', 'Ridge', 'Lasso', 'KNN']
+    if nn_results is not None and not nn_results.empty:
+        nn_rmse = nn_results['rmse']
+        nn_mae = nn_results['mae']
+        comparison_df['NN_RMSE'] = nn_rmse
+        comparison_df['NN_MAE'] = nn_mae
+        model_names.append('NN')
+    
     # Create visualization comparing all models
     plt.figure(figsize=(16, 8))
     
@@ -1198,12 +1419,29 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
     plt.subplot(1, 2, 1)
     x = comparison_df['Fold']
     x_pos = np.arange(len(x))
-    bar_width = 0.2
     
-    plt.bar(x_pos - 1.5*bar_width, comparison_df['OLS_RMSE'], bar_width, label='OLS', color='blue', alpha=0.7)
-    plt.bar(x_pos - 0.5*bar_width, comparison_df['Ridge_RMSE'], bar_width, label='Ridge', color='green', alpha=0.7)
-    plt.bar(x_pos + 0.5*bar_width, comparison_df['Lasso_RMSE'], bar_width, label='Lasso', color='red', alpha=0.7)
-    plt.bar(x_pos + 1.5*bar_width, comparison_df['KNN_RMSE'], bar_width, label='KNN', color='purple', alpha=0.7)
+    num_models = len(model_names)
+    bar_width = 0.8 / num_models
+    
+    colors = {
+        'OLS': 'blue',
+        'Ridge': 'green',
+        'Lasso': 'orange',
+        'KNN': 'purple',
+        'NN': 'red'
+    }
+    
+    # Position multipliers for bar placement
+    positions = np.linspace(-(num_models-1)/2, (num_models-1)/2, num_models)
+    
+    # Create RMSE bars
+    for i, model in enumerate(model_names):
+        plt.bar(x_pos + positions[i]*bar_width, 
+                comparison_df[f'{model}_RMSE'], 
+                bar_width, 
+                label=model, 
+                color=colors[model], 
+                alpha=0.7)
     
     plt.xlabel('Fold')
     plt.ylabel('RMSE')
@@ -1214,10 +1452,15 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
     
     # Plot MAE comparison
     plt.subplot(1, 2, 2)
-    plt.bar(x_pos - 1.5*bar_width, comparison_df['OLS_MAE'], bar_width, label='OLS', color='blue', alpha=0.7)
-    plt.bar(x_pos - 0.5*bar_width, comparison_df['Ridge_MAE'], bar_width, label='Ridge', color='green', alpha=0.7)
-    plt.bar(x_pos + 0.5*bar_width, comparison_df['Lasso_MAE'], bar_width, label='Lasso', color='red', alpha=0.7)
-    plt.bar(x_pos + 1.5*bar_width, comparison_df['KNN_MAE'], bar_width, label='KNN', color='purple', alpha=0.7)
+    
+    # Create MAE bars
+    for i, model in enumerate(model_names):
+        plt.bar(x_pos + positions[i]*bar_width, 
+                comparison_df[f'{model}_MAE'], 
+                bar_width, 
+                label=model, 
+                color=colors[model], 
+                alpha=0.7)
     
     plt.xlabel('Fold')
     plt.ylabel('MAE')
@@ -1231,29 +1474,46 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
     plt.close()
     
     # Calculate average performance
-    avg_performance = pd.DataFrame({
-        'Model': ['OLS', 'Ridge', 'Lasso', 'KNN'],
-        'Avg RMSE': [ols_rmse.mean(), ridge_rmse.mean(), lasso_rmse.mean(), knn_rmse.mean()],
-        'Avg MAE': [ols_mae.mean(), ridge_mae.mean(), lasso_mae.mean(), knn_mae.mean()]
-    })
+    avg_performance = {
+        'Model': model_names,
+        'Avg RMSE': [
+            ols_rmse.mean(), 
+            ridge_rmse.mean(), 
+            lasso_rmse.mean(), 
+            knn_rmse.mean()
+        ],
+        'Avg MAE': [
+            ols_mae.mean(), 
+            ridge_mae.mean(), 
+            lasso_mae.mean(), 
+            knn_mae.mean()
+        ]
+    }
+    
+    # Add NN to average performance if provided
+    if nn_results is not None and not nn_results.empty:
+        avg_performance['Avg RMSE'].append(nn_rmse.mean())
+        avg_performance['Avg MAE'].append(nn_mae.mean())
+    
+    avg_df = pd.DataFrame(avg_performance)
     
     # Create bar chart of average performance
     plt.figure(figsize=(12, 6))
-    x_pos = np.arange(len(avg_performance['Model']))
+    x_pos = np.arange(len(avg_df['Model']))
     bar_width = 0.35
     
-    plt.bar(x_pos - bar_width/2, avg_performance['Avg RMSE'], bar_width, label='RMSE', color='blue', alpha=0.7)
-    plt.bar(x_pos + bar_width/2, avg_performance['Avg MAE'], bar_width, label='MAE', color='red', alpha=0.7)
+    plt.bar(x_pos - bar_width/2, avg_df['Avg RMSE'], bar_width, label='RMSE', color='blue', alpha=0.7)
+    plt.bar(x_pos + bar_width/2, avg_df['Avg MAE'], bar_width, label='MAE', color='red', alpha=0.7)
     
     # Add value labels on top of bars
-    for i, (rmse, mae) in enumerate(zip(avg_performance['Avg RMSE'], avg_performance['Avg MAE'])):
+    for i, (rmse, mae) in enumerate(zip(avg_df['Avg RMSE'], avg_df['Avg MAE'])):
         plt.text(i - bar_width/2, rmse + 0.001, f'{rmse:.4f}', ha='center', va='bottom')
         plt.text(i + bar_width/2, mae + 0.001, f'{mae:.4f}', ha='center', va='bottom')
     
     plt.xlabel('Model')
     plt.ylabel('Error Value')
     plt.title('Average Model Performance')
-    plt.xticks(x_pos, avg_performance['Model'])
+    plt.xticks(x_pos, avg_df['Model'])
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -1262,15 +1522,15 @@ def compare_all_models(ols_results, ridge_results, lasso_results, knn_results):
     plt.close()
     
     print("\n=== Model Comparison ===")
-    print(avg_performance.to_string(index=False, float_format='%.4f'))
+    print(avg_df.to_string(index=False, float_format='%.4f'))
     
     # Determine the best model based on RMSE
-    best_model_idx = avg_performance['Avg RMSE'].idxmin()
-    best_model = avg_performance.loc[best_model_idx, 'Model']
+    best_model_idx = np.argmin(avg_df['Avg RMSE'])
+    best_model = avg_df.loc[best_model_idx, 'Model']
     
     print(f"\nBest performing model based on RMSE: {best_model}")
     
-    return comparison_df, avg_performance
+    return comparison_df, avg_df
 
 if __name__ == "__main__":
     start_date = '2000-01-01'
@@ -1320,8 +1580,11 @@ if __name__ == "__main__":
     # Evaluate KNN regression with automatic k selection
     knn_results, knn_k_values = knn_regression_cv(combined_data_clean, verbose=False)
     
+    # Evaluate Feed-Forward Neural Network
+    nn_results, nn_params = ffnn_regression_cv(combined_data_clean, verbose=False)
+    
     # Compare all models
-    comparison_df, avg_performance = compare_all_models(ols_results, ridge_results, lasso_results, knn_results)
+    comparison_df, avg_performance = compare_all_models(ols_results, ridge_results, lasso_results, knn_results, nn_results)
     
     # Save results to pickle files for later use in comparison plots
     if not os.path.exists('results_cache'):
@@ -1332,5 +1595,11 @@ if __name__ == "__main__":
     
     with open('results_cache/ols_results.pkl', 'wb') as f:
         pickle.dump(ols_results, f)
+    with open('results_cache/ridge_results.pkl', 'wb') as f:
+        pickle.dump(ridge_results, f)
+    with open('results_cache/lasso_results.pkl', 'wb') as f:
+        pickle.dump(lasso_results, f)
     with open('results_cache/knn_results.pkl', 'wb') as f:
         pickle.dump(knn_results, f)
+    with open('results_cache/nn_results.pkl', 'wb') as f:
+        pickle.dump(nn_results, f)
